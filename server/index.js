@@ -27,24 +27,6 @@ let aiClient = null;
 if (apiKey) {
   aiClient = new GoogleGenAI({ apiKey });
   
-  // Self-test streaming on startup
-  (async () => {
-    try {
-      console.log("🔍  Running startup Gemini API self-test...");
-      const stream = await aiClient.models.generateContentStream({
-        model: "gemini-3.1-flash-lite",
-        contents: "Hello, startup test. Respond with one word.",
-      });
-      let chunks = 0;
-      for await (const chunk of stream) {
-        chunks++;
-        console.log(`[SELF-TEST] Chunk ${chunks}: "${chunk.text}"`);
-      }
-      console.log(`🔍  Startup self-test completed. Received ${chunks} chunks.`);
-    } catch (e) {
-      console.error("❌  Startup self-test failed:", e.message);
-    }
-  })();
 } else {
   console.warn("⚠️  GEMINI_API_KEY is not set. Server will run in Mock Streaming Mode.");
 }
@@ -52,39 +34,6 @@ if (apiKey) {
 // Serve built frontend assets in production
 const distPath = path.join(__dirname, "../dist");
 app.use(express.static(distPath));
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Retry helper with exponential backoff
-// Retries a function up to `maxAttempts` times on 429 errors.
-// ─────────────────────────────────────────────────────────────────────────────
-async function retryWithBackoff(fn, maxAttempts = 3, baseDelayMs = 3000) {
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      const is429 =
-        err?.status === 429 ||
-        err?.message?.includes("429") ||
-        err?.message?.includes("Too Many Requests") ||
-        err?.message?.includes("RESOURCE_EXHAUSTED");
-
-      if (is429 && attempt < maxAttempts) {
-        let retryAfterMs = baseDelayMs * Math.pow(2, attempt - 1);
-        try {
-          const match = err?.message?.match(/"retryDelay"\s*:\s*"(\d+)s"/);
-          if (match) retryAfterMs = (parseInt(match[1], 10) + 2) * 1000;
-        } catch (_) { }
-
-        console.warn(
-          `⏳  429 on attempt ${attempt}/${maxAttempts}. Retrying in ${retryAfterMs / 1000}s…`
-        );
-        await new Promise((r) => setTimeout(r, retryAfterMs));
-      } else {
-        throw err;
-      }
-    }
-  }
-}
 
 // Model fallback chain using modern SDK compatible identifiers
 const MODEL_FALLBACK_CHAIN = [
@@ -147,129 +96,104 @@ Only suggest real, searchable movies. Output nothing else.`;
 // POST /api/recommend — SSE streaming endpoint
 // ─────────────────────────────────────────────────────────────────────────────
 app.post("/api/recommend", async (req, res) => {
-  const { mood, time, genre, era, visual, pacing } = req.body;
+  if (!aiClient) {
+    return res.status(500).json({
+      error: "Gemini API key not configured.",
+    });
+  }
 
-  // SSE headers
-  res.setHeader("Content-Type", "text/event-stream");
+  const { mood, time, genre, era, visual, pacing } = req.body;
+  const userPrompt = buildUserPrompt({
+    mood,
+    time,
+    genre,
+    era,
+    visual,
+    pacing,
+  });
+
+  // Streaming headers (for fetch + ReadableStream)
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
 
-  // Keep-alive ping every 10 s — prevents AWS App Runner / Gateway timeouts
-  const keepAlive = setInterval(() => res.write(":\n\n"), 10000);
-  req.on("close", () => clearInterval(keepAlive));
-
-  // ── Mock Mode ──────────────────────────────────────────────────────────────
-  if (!aiClient) {
-    const mock = `[RECOMMENDATION 1]
-[TITLE] THE NEON SHADOW
-[METADATA] Year: 2024 | Director: Elena Rostova | Runtime: 88 mins
-[TAGLINE] "In a city drowned in light, the deepest secrets sleep in the dark."
-[CONTENT]
-### Curation Synopsis
-A retro-futuristic neo-noir set in a rain-slicked metropolis. A private investigator with a cybernetic memory is hired to retrieve a lost analog film reel.
-
-### Why It Fits
-- Matches the requested ${mood} mood with its brooding atmosphere.
-- The ${visual} visuals align perfectly with the high-contrast aesthetic.
-
-[RECOMMENDATION 2]
-[TITLE] ECHOES OF TOMORROW
-[METADATA] Year: 2019 | Director: Marcus Vance | Runtime: 92 mins
-[TAGLINE] "Time is just another frequency."
-[CONTENT]
-### Curation Synopsis
-A tense, intimate sci-fi chamber piece where two scientists accidentally bridge a communication gap across decades.
-
-### Why It Fits
-- Delivers the ${pacing} pacing through brilliant dialogue and tight editing.
-- Fits the ${time} constraint while offering profound emotional impact.
-
-[RECOMMENDATION 3]
-[TITLE] VELVET HORIZON
-[METADATA] Year: 1984 | Director: Julian Croft | Runtime: 104 mins
-[TAGLINE] "The desert remembers what the city forgets."
-[CONTENT]
-### Curation Synopsis
-A sun-drenched, slow-burn thriller following a drifter caught in a conspiracy across the American Southwest.
-
-### Why It Fits
-- Pure ${era} aesthetics with an incredible analog synth score.
-- Satisfies the ${genre} requirement without falling into tropes.`;
-
-    try {
-      for (const word of mock.split(" ")) {
-        if (req.destroyed) break;
-        res.write(`data: ${JSON.stringify({ text: word + " " })}\n\n`);
-        await new Promise((r) => setTimeout(r, 30));
-      }
-      res.write("data: [DONE]\n\n");
-      res.end();
-    } catch (e) {
-      console.error(e);
-    } finally {
-      clearInterval(keepAlive);
+  const keepAlive = setInterval(() => {
+    if (!res.writableEnded) {
+      res.write("");
     }
-    return;
-  }
+  }, 10000);
 
-  // ── Real Mode — model fallback chain using unified @google/genai SDK ────────
-  const userPrompt = buildUserPrompt({ mood, time, genre, era, visual, pacing });
-  console.log("Incoming request selections:", req.body);
-  console.log("Generated userPrompt length:", userPrompt.length);
-  console.log("Full prompt details:\n", userPrompt);
+  req.on("close", () => {
+    clearInterval(keepAlive);
+    console.log("🔌 Client disconnected");
+  });
+
   let lastError = null;
 
-  for (const modelName of MODEL_FALLBACK_CHAIN) {
-    if (req.destroyed) break;
+  try {
+    for (const modelName of MODEL_FALLBACK_CHAIN) {
+      try {
+        console.log(`🎬 Trying model: ${modelName}`);
 
-    try {
-      console.log(`🎬  Trying model: ${modelName}`);
+        const stream = await aiClient.models.generateContentStream({
+          model: modelName,
+          contents: userPrompt,
+          config: {
+            systemInstruction: SYSTEM_INSTRUCTION,
+            temperature: 0.75,
+          },
+        });
 
-      const responseStream = await aiClient.models.generateContentStream({
-        model: "gemini-3.1-flash-lite",
-        contents: "Hello, recommend one movie name. Just the name.",
-      });
+        for await (const chunk of stream) {
+          if (res.writableEnded || !res.writable) {
+            console.log("🔌 Connection closed by client");
+            return;
+          }
 
-      for await (const chunk of responseStream) {
-        if (req.destroyed) break;
-        if (chunk.text) {
-          console.log(`Writing chunk: "${chunk.text.substring(0, 30)}..."`);
-          res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
-        } else {
-          console.log("Empty chunk or no text property");
+          if (chunk.text) {
+            console.log("data is: ",chunk.text);
+            res.write(chunk.text);
+          }
         }
-      }
 
-      res.write("data: [DONE]\n\n");
-      res.end();
-      clearInterval(keepAlive);
-      console.log(`✅  Streamed successfully via ${modelName}`);
-      return;
-    } catch (error) {
-      lastError = error;
-      const is429 =
-        error?.status === 429 ||
-        error?.message?.includes("429") ||
-        error?.message?.includes("RESOURCE_EXHAUSTED") ||
-        error?.message?.includes("Quota exceeded");
+        console.log(`✅ Streamed successfully via ${modelName}`);
+        res.end();
+        return;
 
-      if (is429) {
-        console.warn(`⚠️  ${modelName} quota exhausted — trying next model…`);
-        continue;
+      } catch (error) {
+        lastError = error;
+
+        const is429 =
+          error?.status === 429 ||
+          error?.message?.includes("429") ||
+          error?.message?.includes("RESOURCE_EXHAUSTED") ||
+          error?.message?.includes("Quota exceeded");
+
+        if (is429) {
+          console.warn(`⚠️ ${modelName} quota exhausted. Trying next model...`);
+          continue;
+        }
+
+        throw error;
       }
-      break; // Non-429: bail out immediately
     }
-  }
 
-  // All models failed
-  clearInterval(keepAlive);
-  if (!res.destroyed) {
-    const msg =
-      lastError?.message ||
-      "All AI models are currently quota-limited. Please try again in a few minutes.";
-    console.log("All fallbacks failed:", msg);
-    res.write(`data: ${JSON.stringify({ error: msg })}\n\n`);
-    res.end();
+    // All models failed
+    res.status(500).end(
+      lastError?.message || "All AI models are currently unavailable."
+    );
+  } catch (error) {
+    console.error("❌ Recommendation error:", error);
+
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: error.message || "Internal Server Error",
+      });
+    } else {
+      res.end();
+    }
+  } finally {
+    clearInterval(keepAlive);
   }
 });
 

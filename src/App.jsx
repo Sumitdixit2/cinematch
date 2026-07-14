@@ -146,21 +146,66 @@ const ERAS = ["Classic (Pre-80s)", "Golden Age (80s-90s)", "Modern (2000s+)", "B
 const VISUALS = ["Gritty & Raw", "Stylized & Neon", "Sleek & Minimal", "Cinematic Epic"];
 const PACINGS = ["Slow & Deliberate", "Steady Tension", "Fast & Chaotic", "Unpredictable"];
 
-const PICKS = {
-  "Slow burn": "A quiet mystery with patient tension and a final act that rewards attention.",
-  "Comfort": "A warm ensemble watch with low stakes, sharp dialogue, and familiar emotional rhythm.",
-  "Mind-bending": "A puzzle-box story with layered timelines, clean reveals, and late-night momentum.",
-  "Date night": "A polished crowd-pleaser with charm, chemistry, and enough edge to keep it memorable."
-};
-
 function Engine() {
+  const [resultText, setResultText] = useState("");
+  const [isGenerating, setIsGenerating] = useState(false);
   const [step, setStep] = useState(0);
   const [selections, setSelections] = useState({ mood: "", time: "", genre: "", era: "", visual: "", pacing: "" });
 
-  const handleSelect = (type, val) => {
-    setSelections(s => ({ ...s, [type]: val }));
-    setStep(s => s + 1);
-  };
+const handleSelect = async (type, val) => {
+  const newSelections = { ...selections, [type]: val };
+
+  // Check before updating state (setState is async)
+  const isLastStep = step === steps.length - 1;
+
+  setSelections(newSelections);
+  setStep((s) => s + 1);
+
+  if (!isLastStep) return;
+
+  setIsGenerating(true);
+  setResultText("");
+
+  try {
+    const response = await fetch("http://localhost:3000/api/recommend", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(newSelections),
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    if (!response.body) {
+      throw new Error("Streaming not supported by this browser.");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done) break;
+
+      const text = decoder.decode(value, { stream: true });
+
+      console.log("📦 Chunk:", text);
+
+      setResultText((prev) => prev + text);
+    }
+
+    console.log("✅ Stream complete");
+  } catch (err) {
+    console.error("Engine failure:", err);
+    setResultText("Engine failed to ignite. Please try again.");
+  } finally {
+    setIsGenerating(false);
+  }
+};
 
   const reset = () => {
     setStep(0);
@@ -214,23 +259,24 @@ function Engine() {
               initial={{ opacity: 0, scale: 0.95, filter: "blur(12px)" }}
               animate={{ opacity: 1, scale: 1, filter: "blur(0px)" }}
               transition={{ duration: 0.8, ease: "easeOut", delay: 0.2 }}
-              className="flex flex-col md:flex-row items-center gap-12"
+              className="flex flex-col md:flex-row gap-12"
             >
-              <div className="w-full md:w-1/3 aspect-[3/4] rounded-3xl overflow-hidden relative">
+              <div className="w-full md:w-1/3 aspect-[3/4] rounded-3xl overflow-hidden relative sticky top-10 h-fit">
                  <img src={AESTHETIC_IMAGES.stack1} alt="Recommended film" className="absolute inset-0 w-full h-full object-cover mix-blend-luminosity grayscale hover:grayscale-0 transition-all duration-1000" />
                  <div className="absolute inset-0 bg-ink/20 mix-blend-multiply" />
               </div>
               <div className="flex-1 flex flex-col items-start space-y-6 text-left">
                 <div className="px-4 py-1.5 rounded-full border border-amber/30 text-amber text-xs font-bold tracking-widest uppercase">
-                  Match Found
+                  Matches Found
                 </div>
-                <h2 className="text-5xl md:text-6xl font-bold tracking-tighter text-cream leading-none">
-                  The Perfect {selections.genre}.
-                </h2>
-                <p className="text-xl text-cream/70 leading-relaxed max-w-md">
-                  {PICKS[selections.mood]} Tuned specifically for a {selections.time.toLowerCase()} window.
-                </p>
-                <button onClick={reset} className="flex items-center gap-2 text-cream/50 hover:text-cream transition-colors mt-8">
+                
+                <div className="w-full text-lg text-cream/80 leading-relaxed whitespace-pre-wrap font-sans">
+                  {isGenerating && !resultText 
+                    ? "Calibrating cinematic grid...\nGenerating curations based on your frequency..." 
+                    : resultText}
+                </div>
+
+                <button onClick={reset} className="flex items-center gap-2 text-cream/50 hover:text-cream transition-colors mt-8 pt-6 border-t border-cream/10 w-full">
                   <ArrowCounterClockwise /> <span>Calibrate again</span>
                 </button>
               </div>
