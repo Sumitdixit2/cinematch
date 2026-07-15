@@ -146,12 +146,10 @@ app.post("/api/recommend", async (req, res) => {
 
         for await (const chunk of stream) {
           if (res.writableEnded || !res.writable) {
-            console.log("🔌 Connection closed by client");
             return;
           }
 
           if (chunk.text) {
-            console.log("data is: ",chunk.text);
             res.write(chunk.text);
           }
         }

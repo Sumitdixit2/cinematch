@@ -61,7 +61,7 @@ To test the container locally exactly as it will run on AWS:
    ```
 2. Run the Docker container:
    ```bash
-   docker run -p 3000:3000 -e GEMINI_API_KEY="YOUR_API_KEY_HERE" cinematch
+   docker run -p 3000:3000 --env-file server/.env cinematch
    ```
 3. Open `http://localhost:3000` to verify that both the frontend and backend are served on a single port.
 
