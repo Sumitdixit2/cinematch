@@ -195,6 +195,10 @@ app.post("/api/recommend", async (req, res) => {
   }
 });
 
+app.get('/health', (req, res) => {
+  res.status(200).send('OK');
+});
+
 // SPA catch-all — serve index.html for any non-API route
 app.get("*", (req, res) => {
   res.sendFile(path.join(distPath, "index.html"));
